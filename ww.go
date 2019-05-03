@@ -277,7 +277,8 @@ func (l *Logger) prefixAndExt() (prefix, ext string) {
 }
 
 const (
-	BackupTimeFmt = time.RFC3339
+	BackupTimeFmt = ISO8601TimeFormat
+	ISO8601TimeFormat = "2006-01-02T15:04:05.000Z0700"
 )
 
 // timeFromName extracts the formatted time from the filename by stripping off
