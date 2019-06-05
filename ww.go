@@ -46,7 +46,7 @@ type Logger struct {
 
 	// rotation config.
 	maxSize    int64
-	Backups    *backupInfos // all backups information.
+	Backups    *BackupInfos // all backups information.
 	maxBackups int
 	localTime  bool
 }
@@ -180,7 +180,7 @@ func (l *Logger) parseConf(conf *Config) (err error) {
 // List all backup log files (in init process),
 // and remove them if there are too many backups.
 func (l *Logger) listBackup() {
-	backups := make(backupInfos, 0, defaultMaxBackups*2)
+	backups := make(BackupInfos, 0, defaultMaxBackups*2)
 	l.Backups = &backups
 
 	dir := filepath.Dir(l.outputPath)
@@ -196,14 +196,14 @@ func (l *Logger) listBackup() {
 			continue
 		}
 		if ts, err := l.timeFromName(f.Name(), prefix, ext); err == nil {
-			heap.Push(l.Backups, backupInfo{ts, filepath.Join(dir, f.Name())})
+			heap.Push(l.Backups, BackupInfo{ts, filepath.Join(dir, f.Name())})
 			continue
 		}
 	}
 
 	for l.Backups.Len() > l.maxBackups {
 		v := heap.Pop(l.Backups)
-		os.Remove(v.(backupInfo).fp)
+		os.Remove(v.(BackupInfo).Fp)
 	}
 }
 
@@ -247,10 +247,10 @@ func (l *Logger) openNew() (err error) {
 		}
 		l.sync(true)
 
-		heap.Push(l.Backups, backupInfo{t, backupFP})
+		heap.Push(l.Backups, BackupInfo{t, backupFP})
 		if l.Backups.Len() > l.maxBackups {
 			v := heap.Pop(l.Backups)
-			os.Remove(v.(backupInfo).fp)
+			os.Remove(v.(BackupInfo).Fp)
 		}
 	}
 
@@ -404,35 +404,35 @@ func (l *Logger) doSyncJob() {
 	}
 }
 
-type backupInfo struct {
+type BackupInfo struct {
 	ts int64
-	fp string
+	Fp string
 }
 
-// backupInfos implements heap interface.
-type backupInfos []backupInfo
+// BackupInfos implements heap interface.
+type BackupInfos []BackupInfo
 
-func (h *backupInfos) Less(i, j int) bool {
+func (h *BackupInfos) Less(i, j int) bool {
 	return (*h)[i].ts < ((*h)[j].ts)
 }
 
-func (h *backupInfos) Swap(i, j int) {
+func (h *BackupInfos) Swap(i, j int) {
 	if i >= 0 && j >= 0 {
 		(*h)[i], (*h)[j] = (*h)[j], (*h)[i]
 	}
 }
 
-func (h *backupInfos) Len() int {
+func (h *BackupInfos) Len() int {
 	return len(*h)
 }
 
-func (h *backupInfos) Pop() (v interface{}) {
+func (h *BackupInfos) Pop() (v interface{}) {
 	if h.Len()-1 >= 0 {
 		*h, v = (*h)[:h.Len()-1], (*h)[h.Len()-1]
 	}
 	return
 }
 
-func (h *backupInfos) Push(v interface{}) {
-	*h = append(*h, v.(backupInfo))
+func (h *BackupInfos) Push(v interface{}) {
+	*h = append(*h, v.(BackupInfo))
 }
