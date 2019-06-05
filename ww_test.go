@@ -285,9 +285,9 @@ func TestLogger_Rotate(t *testing.T) {
 
 	time.Sleep(time.Second) // wait for sync
 
-	backup := heap.Pop(l.Backups).(backupInfo)
+	backup := heap.Pop(l.Backups).(BackupInfo)
 	prefix, ext := l.prefixAndExt()
-	tt, err := l.timeFromName(backup.fp, prefix, ext)
+	tt, err := l.timeFromName(backup.Fp, prefix, ext)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +295,7 @@ func TestLogger_Rotate(t *testing.T) {
 		t.Fatal("backup time mismatch")
 	}
 
-	backupStat, err := os.Stat(backup.fp)
+	backupStat, err := os.Stat(backup.Fp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,14 +355,14 @@ func TestWriteSync(t *testing.T) {
 }
 
 func TestLogger_BackupInfos(t *testing.T) {
-	h := make(backupInfos, 0, 3)
+	h := make(BackupInfos, 0, 3)
 	now := time.Now()
 	for i := 3; i > 0; i-- {
 		now = now.Add(-time.Second)
-		heap.Push(&h, backupInfo{now.Unix(), strconv.FormatInt(int64(i), 10)})
+		heap.Push(&h, BackupInfo{now.Unix(), strconv.FormatInt(int64(i), 10)})
 	}
-	backup := heap.Pop(&h).(backupInfo)
-	if backup.fp != "1" {
+	backup := heap.Pop(&h).(BackupInfo)
+	if backup.Fp != "1" {
 		t.Fatal("backupInfos pop mismatch")
 	}
 }
