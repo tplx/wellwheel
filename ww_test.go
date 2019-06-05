@@ -123,9 +123,9 @@ func TestLogger_Write_Sync(t *testing.T) {
 
 	bufSize := 10
 	kb = 1
-	defaultBytesPerSync = 10
 	l, err := New(&Config{
 		OutputPath: outputPath, BufSize: int64(bufSize),
+		BytesPerSync: 10,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -185,8 +185,8 @@ func TestLogger_Write_GT_Interval(t *testing.T) {
 	}
 	time.Sleep(1200 * time.Millisecond)
 
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.Mu.Lock()
+	defer l.Mu.Unlock()
 	if l.dirtySize != 0 {
 		t.Fatal("dirtySize mismatch")
 	}
@@ -285,7 +285,7 @@ func TestLogger_Rotate(t *testing.T) {
 
 	time.Sleep(time.Second) // wait for sync
 
-	backup := heap.Pop(l.backups).(backupInfo)
+	backup := heap.Pop(l.Backups).(backupInfo)
 	prefix, ext := l.prefixAndExt()
 	tt, err := l.timeFromName(backup.fp, prefix, ext)
 	if err != nil {
@@ -308,6 +308,49 @@ func TestLogger_Rotate(t *testing.T) {
 	}
 	if l.dirtyOffset != 0 {
 		t.Fatal("dirtyOffset mismatch")
+	}
+}
+
+func TestWriteSync(t *testing.T) {
+	outputPath := filepath.Join(os.TempDir(), "test_logger_write"+strconv.FormatInt(time.Now().UnixNano(), 10))
+	var l *Logger
+	defer func() {
+		os.Remove(outputPath)
+	}()
+
+	l, err := New(&Config{
+		OutputPath: outputPath,
+		Sync:       true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	writeSize := 3
+
+	for i := 0; i < writeSize; i++ {
+		written, err := l.Write([]byte{'1'})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if written != 1 {
+			t.Fatal("written mismatch")
+		}
+	}
+
+	if l.dirtySize != 0 {
+		t.Fatal("dirtySize mismatch")
+	}
+	if l.dirtyOffset != int64(writeSize) {
+		t.Fatal("dirtyOffset mismatch")
+	}
+
+	stat, err := os.Stat(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stat.Size() != int64(writeSize) {
+		t.Fatal("fsize mismatch")
 	}
 }
 
