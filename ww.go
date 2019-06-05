@@ -22,7 +22,7 @@ import (
 )
 
 type Logger struct {
-	mu sync.Mutex
+	Mu sync.Mutex
 
 	// log file status.
 	outputPath string
@@ -37,30 +37,32 @@ type Logger struct {
 	buf     *bufio.Writer
 	bufSize int
 
+	syncWrite bool
+
 	// jobs of sync page cache, use chan for avoiding stall.
 	syncJobs     chan syncJob
+	bytesPerSync int64
 	syncInterval time.Duration
 
 	// rotation config.
 	maxSize    int64
-	backups    *backupInfos // all backups information.
+	Backups    *backupInfos // all backups information.
 	maxBackups int
 	localTime  bool
 }
 
 // Config of Logger.
 type Config struct {
-	// Log file path.
-	OutputPath string `json:"output_path" toml:"output_path"`
+	OutputPath string `json:"output_path" toml:"output_path"` // Log file path.
 
+	Sync bool `json:"sync" toml:"sync"` // Sync every writes or not.
 	// User Space buffer size.
 	// Unit is KB.
 	BufSize int64 `json:"buf_size" toml:"buf_size"`
-
 	// The Interval of flushing data from buffer&page cache to storage media.
 	// Unit is second.
 	SyncInterval int64 `json:"sync_interval" toml:"sync_interval"`
-
+	BytesPerSync int64 `json:"bytes_per_sync" toml:"bytes_per_sync"` // After write BytesPerSync bytes call sync.
 	// Maximum size of a log file before it gets rotated.
 	// Unit is MB.
 	MaxSize int64 `json:"max_size" toml:"max_size"`
@@ -70,7 +72,7 @@ type Config struct {
 	LocalTime bool `json:"local_time" toml:"local_time"`
 }
 
-// Variables for tests.
+// Use variables for tests.
 var (
 	kb int64 = 1024
 	mb int64 = 1024 * 1024
@@ -124,6 +126,8 @@ func (l *Logger) init(conf *Config) (err error) {
 		return
 	}
 
+	l.syncWrite = conf.Sync
+
 	l.buf = bufio.NewWriterSize(l.file, l.bufSize)
 	l.syncJobs = make(chan syncJob, 8)
 	return
@@ -158,6 +162,12 @@ func (l *Logger) parseConf(conf *Config) (err error) {
 
 	l.localTime = conf.LocalTime
 
+	if conf.BytesPerSync <= 0 {
+		l.bytesPerSync = defaultBytesPerSync
+	} else {
+		l.bytesPerSync = conf.BytesPerSync
+	}
+
 	if conf.SyncInterval <= 0 {
 		l.syncInterval = defaultSyncInterval
 	} else {
@@ -171,7 +181,7 @@ func (l *Logger) parseConf(conf *Config) (err error) {
 // and remove them if there are too many backups.
 func (l *Logger) listBackup() {
 	backups := make(backupInfos, 0, defaultMaxBackups*2)
-	l.backups = &backups
+	l.Backups = &backups
 
 	dir := filepath.Dir(l.outputPath)
 	ns, err := ioutil.ReadDir(dir)
@@ -186,13 +196,13 @@ func (l *Logger) listBackup() {
 			continue
 		}
 		if ts, err := l.timeFromName(f.Name(), prefix, ext); err == nil {
-			heap.Push(l.backups, backupInfo{ts, filepath.Join(dir, f.Name())})
+			heap.Push(l.Backups, backupInfo{ts, filepath.Join(dir, f.Name())})
 			continue
 		}
 	}
 
-	for l.backups.Len() > l.maxBackups {
-		v := heap.Pop(l.backups)
+	for l.Backups.Len() > l.maxBackups {
+		v := heap.Pop(l.Backups)
 		os.Remove(v.(backupInfo).fp)
 	}
 }
@@ -237,9 +247,9 @@ func (l *Logger) openNew() (err error) {
 		}
 		l.sync(true)
 
-		heap.Push(l.backups, backupInfo{t, backupFP})
-		if l.backups.Len() > l.maxBackups {
-			v := heap.Pop(l.backups)
+		heap.Push(l.Backups, backupInfo{t, backupFP})
+		if l.Backups.Len() > l.maxBackups {
+			v := heap.Pop(l.Backups)
 			os.Remove(v.(backupInfo).fp)
 		}
 	}
@@ -260,6 +270,7 @@ func (l *Logger) openNew() (err error) {
 	}
 
 	l.file = f
+	l.buf = bufio.NewWriterSize(f, l.bufSize)
 	l.size = 0
 	l.dirtyOffset = 0
 	l.dirtySize = 0
@@ -277,7 +288,7 @@ func (l *Logger) prefixAndExt() (prefix, ext string) {
 }
 
 const (
-	BackupTimeFmt = ISO8601TimeFormat
+	BackupTimeFmt     = ISO8601TimeFormat
 	ISO8601TimeFormat = "2006-01-02T15:04:05.000Z0700"
 )
 
@@ -315,19 +326,33 @@ func makeBackupFP(name string, local bool) (string, int64) {
 }
 
 func (l *Logger) Write(p []byte) (written int, err error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.Mu.Lock()
+	defer l.Mu.Unlock()
 
 	written, err = l.buf.Write(p)
 	if err != nil {
 		return
 	}
-	l.dirtySize += int64(written)
-	if l.dirtySize >= int64(defaultBytesPerSync) {
-		l.sync(false)
-	}
 
 	l.size += int64(written)
+	l.dirtySize += int64(written)
+	if l.syncWrite {
+		err = l.buf.Flush()
+		if err != nil {
+			return
+		}
+		err = fnc.Flush(l.file, l.dirtyOffset, l.dirtySize)
+		if err != nil {
+			return
+		}
+		l.dirtyOffset += l.dirtySize
+		l.dirtySize = 0
+	} else {
+		if l.dirtySize >= l.bytesPerSync {
+			l.sync(false)
+		}
+	}
+
 	if l.size > l.maxSize {
 		if err = l.openNew(); err != nil {
 			return
@@ -338,8 +363,8 @@ func (l *Logger) Write(p []byte) (written int, err error) {
 
 // Sync buf & dirty_page_cache to the storage media.
 func (l *Logger) Sync() (err error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.Mu.Lock()
+	defer l.Mu.Unlock()
 
 	l.sync(false)
 	return
@@ -350,7 +375,6 @@ func (l *Logger) sync(isBackup bool) {
 	l.buf.Flush()
 
 	l.syncJobs <- syncJob{l.file, l.size, l.dirtyOffset, l.dirtySize, isBackup}
-
 	l.dirtyOffset += l.dirtySize
 	l.dirtySize = 0
 }
@@ -393,7 +417,9 @@ func (h *backupInfos) Less(i, j int) bool {
 }
 
 func (h *backupInfos) Swap(i, j int) {
-	(*h)[i], (*h)[j] = (*h)[j], (*h)[i]
+	if i >= 0 && j >= 0 {
+		(*h)[i], (*h)[j] = (*h)[j], (*h)[i]
+	}
 }
 
 func (h *backupInfos) Len() int {
@@ -401,7 +427,9 @@ func (h *backupInfos) Len() int {
 }
 
 func (h *backupInfos) Pop() (v interface{}) {
-	*h, v = (*h)[:h.Len()-1], (*h)[h.Len()-1]
+	if h.Len()-1 >= 0 {
+		*h, v = (*h)[:h.Len()-1], (*h)[h.Len()-1]
+	}
 	return
 }
 
