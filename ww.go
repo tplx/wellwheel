@@ -220,7 +220,7 @@ func (l *Logger) openExistOrNew() (err error) {
 		flag |= os.O_APPEND
 	}
 
-	f, err := fnc.OpenFile(l.outputPath, flag, 0644)
+	f, err := l.openFile(l.outputPath, flag)
 	if err != nil {
 		return
 	}
@@ -248,9 +248,10 @@ func (l *Logger) openNew() (err error) {
 	if fnc.Exist(fp) { // file exist may happen in rotation process.
 		backupFP, t := makeBackupFP(fp, l.localTime)
 
-		if err = os.Rename(fp, backupFP); err != nil {
-			return fmt.Errorf("failed to rename log file, output: %s backup: %s", fp, backupFP)
+		if err = l.rename(fp, backupFP); err != nil {
+			return
 		}
+
 		l.sync(true)
 
 		heap.Push(l.Backups, BackupInfo{t, backupFP})
@@ -265,6 +266,12 @@ func (l *Logger) openNew() (err error) {
 	if err != nil {
 		return fmt.Errorf("failed to make dirs for log file: %s", err.Error())
 	}
+	if l.syncWrite {
+		err = fnc.SyncDir(filepath.Dir(dir))
+		if err != nil {
+			return
+		}
+	}
 
 	// Open a totally new file.
 	// Truncate here to clean up file content if someone else creates
@@ -274,9 +281,9 @@ func (l *Logger) openNew() (err error) {
 	if l.appendOnly {
 		flag |= os.O_APPEND
 	}
-	f, err := fnc.OpenFile(fp, flag, 0644)
+	f, err := l.openFile(fp, flag)
 	if err != nil {
-		return fmt.Errorf("failed to open log file: %s", err.Error())
+		return
 	}
 
 	l.file = f
@@ -286,6 +293,34 @@ func (l *Logger) openNew() (err error) {
 	l.dirtySize = 0
 
 	return
+}
+
+func (l *Logger) openFile(fp string, flag int) (f *os.File, err error) {
+	f, err = fnc.OpenFile(fp, flag, 0644)
+	if err != nil {
+		return f, fmt.Errorf("failed to open log file:%s", err.Error())
+	}
+	if l.syncWrite {
+		err = fnc.SyncDir(filepath.Dir(fp))
+		if err != nil {
+			return f, fmt.Errorf("failed to sync log file dir:%s", err.Error())
+		}
+	}
+	return
+}
+
+func (l *Logger) rename(oldpath, newpath string) error {
+	err := os.Rename(oldpath, newpath)
+	if err != nil {
+		return fmt.Errorf("failed to rename log file, output: %s backup: %s", oldpath, newpath)
+	}
+	if l.syncWrite {
+		err = fnc.SyncDir(filepath.Dir(newpath))
+		if err != nil {
+			return fmt.Errorf("failed to sync log file dir:%s", err.Error())
+		}
+	}
+	return nil
 }
 
 // prefixAndExt returns the filename part and extension part from the Logger's
