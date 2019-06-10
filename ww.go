@@ -26,8 +26,9 @@ type Logger struct {
 
 	// log file status.
 	outputPath string
+	appendOnly bool     // os.O_APPEND.
 	file       *os.File // output *os.File.
-	size       int64    // output file size.
+	fsize      int64    // output file size.
 	// dirty page cache info.
 	// ps: may already been flushed by kernel.
 	dirtyOffset int64
@@ -214,7 +215,12 @@ func (l *Logger) openExistOrNew() (err error) {
 		return l.openNew()
 	}
 
-	f, err := os.OpenFile(l.outputPath, os.O_WRONLY|os.O_APPEND, 0644)
+	flag := os.O_WRONLY
+	if l.appendOnly {
+		flag |= os.O_APPEND
+	}
+
+	f, err := fnc.OpenFile(l.outputPath, flag, 0644)
 	if err != nil {
 		return
 	}
@@ -225,7 +231,7 @@ func (l *Logger) openExistOrNew() (err error) {
 	}
 
 	l.file = f
-	l.size = stat.Size()
+	l.fsize = stat.Size()
 
 	// maybe not correct, but it's ok.
 	l.dirtyOffset = stat.Size()
@@ -264,14 +270,18 @@ func (l *Logger) openNew() (err error) {
 	// Truncate here to clean up file content if someone else creates
 	// the file between exist checking and create file.
 	// Can't use os.O_EXCL here, because it may break rotation process.
-	f, err := os.OpenFile(fp, os.O_WRONLY|os.O_APPEND|os.O_CREATE|os.O_TRUNC, 0644)
+	flag := os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	if l.appendOnly {
+		flag |= os.O_APPEND
+	}
+	f, err := fnc.OpenFile(fp, flag, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to open log file: %s", err.Error())
 	}
 
 	l.file = f
 	l.buf = bufio.NewWriterSize(f, l.bufSize)
-	l.size = 0
+	l.fsize = 0
 	l.dirtyOffset = 0
 	l.dirtySize = 0
 
@@ -334,7 +344,7 @@ func (l *Logger) Write(p []byte) (written int, err error) {
 		return
 	}
 
-	l.size += int64(written)
+	l.fsize += int64(written)
 	l.dirtySize += int64(written)
 	if l.syncWrite {
 		err = l.buf.Flush()
@@ -353,7 +363,7 @@ func (l *Logger) Write(p []byte) (written int, err error) {
 		}
 	}
 
-	if l.size > l.maxSize {
+	if l.fsize > l.maxSize {
 		if err = l.openNew(); err != nil {
 			return
 		}
@@ -374,7 +384,7 @@ func (l *Logger) sync(isBackup bool) {
 
 	l.buf.Flush()
 
-	l.syncJobs <- syncJob{l.file, l.size, l.dirtyOffset, l.dirtySize, isBackup}
+	l.syncJobs <- syncJob{l.file, l.fsize, l.dirtyOffset, l.dirtySize, isBackup}
 	l.dirtyOffset += l.dirtySize
 	l.dirtySize = 0
 }
