@@ -24,9 +24,11 @@ import (
 type Logger struct {
 	Mu sync.Mutex
 
+	developed bool
+
 	// log file status.
 	outputPath string
-	appendOnly bool     // os.O_APPEND.
+	pwriteOn   bool
 	file       *os.File // output *os.File.
 	fsize      int64    // output file size.
 	// dirty page cache info.
@@ -55,6 +57,10 @@ type Logger struct {
 // Config of Logger.
 type Config struct {
 	OutputPath string `json:"output_path" toml:"output_path"` // Log file path.
+
+	Developed bool `json:"developed" toml:"developed"` // Develop mode.
+
+	EnablePWrite bool `json:"enable_pwrite" toml:"enable_pwrite"` // If true, preallocate and use Logger.WriteAt
 
 	Sync bool `json:"sync" toml:"sync"` // Sync every writes or not.
 	// User Space buffer size.
@@ -129,13 +135,18 @@ func (l *Logger) init(conf *Config) (err error) {
 
 	l.syncWrite = conf.Sync
 
-	l.buf = bufio.NewWriterSize(l.file, l.bufSize)
+	if !l.pwriteOn {
+		l.buf = bufio.NewWriterSize(l.file, l.bufSize)
+	}
 	l.syncJobs = make(chan syncJob, 8)
 	return
 }
 
 // Set Logger's args from Config.
 func (l *Logger) parseConf(conf *Config) (err error) {
+
+	l.developed = conf.Developed
+	l.pwriteOn = conf.EnablePWrite
 
 	if conf.OutputPath == "" {
 		return errors.New("empty log file path")
@@ -175,7 +186,19 @@ func (l *Logger) parseConf(conf *Config) (err error) {
 		l.syncInterval = time.Duration(conf.SyncInterval) * time.Second
 	}
 
+	if !l.developed {
+		l.bufSize = int(alignToPage(int64(l.bufSize)))
+		l.maxSize = alignToPage(l.maxSize)
+		l.bytesPerSync = alignToPage(l.bytesPerSync)
+	}
+
 	return
+}
+
+const align = 1 << 12 // 4KB.
+
+func alignToPage(n int64) int64 {
+	return (n + align - 1) &^ (align - 1)
 }
 
 // List all backup log files (in init process),
@@ -211,16 +234,11 @@ func (l *Logger) listBackup() {
 // Open log file when start up.
 func (l *Logger) openExistOrNew() (err error) {
 
-	if !fnc.Exist(l.outputPath) {
+	if !fnc.Exist(l.outputPath) || l.pwriteOn { // if pwriteOn we won't rely on fsize, so we need open new.
 		return l.openNew()
 	}
 
-	flag := os.O_WRONLY
-	if l.appendOnly {
-		flag |= os.O_APPEND
-	}
-
-	f, err := l.openFile(l.outputPath, flag)
+	f, err := l.openFile(l.outputPath, os.O_WRONLY)
 	if err != nil {
 		return
 	}
@@ -278,9 +296,6 @@ func (l *Logger) openNew() (err error) {
 	// the file between exist checking and create file.
 	// Can't use os.O_EXCL here, because it may break rotation process.
 	flag := os.O_WRONLY | os.O_CREATE | os.O_TRUNC
-	if l.appendOnly {
-		flag |= os.O_APPEND
-	}
 	f, err := l.openFile(fp, flag)
 	if err != nil {
 		return
@@ -296,10 +311,19 @@ func (l *Logger) openNew() (err error) {
 }
 
 func (l *Logger) openFile(fp string, flag int) (f *os.File, err error) {
+	if !l.pwriteOn {
+		flag |= os.O_APPEND
+	}
+
 	f, err = fnc.OpenFile(fp, flag, 0644)
 	if err != nil {
 		return f, fmt.Errorf("failed to open log file:%s", err.Error())
 	}
+
+	if l.pwriteOn {
+		fnc.PreAllocate(f, l.maxSize)
+	}
+
 	if l.syncWrite {
 		err = fnc.SyncDir(filepath.Dir(fp))
 		if err != nil {
@@ -370,6 +394,7 @@ func makeBackupFP(name string, local bool) (string, int64) {
 	return filepath.Join(dir, fmt.Sprintf("%s-%s%s", prefix, timestamp, ext)), t.Unix()
 }
 
+// only append-only
 func (l *Logger) Write(p []byte) (written int, err error) {
 	l.Mu.Lock()
 	defer l.Mu.Unlock()
@@ -382,10 +407,13 @@ func (l *Logger) Write(p []byte) (written int, err error) {
 	l.fsize += int64(written)
 	l.dirtySize += int64(written)
 	if l.syncWrite {
-		err = l.buf.Flush()
-		if err != nil {
-			return
+		if l.buf != nil {
+			err = l.buf.Flush()
+			if err != nil {
+				return
+			}
 		}
+
 		err = fnc.Flush(l.file, l.dirtyOffset, l.dirtySize)
 		if err != nil {
 			return
@@ -406,6 +434,40 @@ func (l *Logger) Write(p []byte) (written int, err error) {
 	return
 }
 
+// only !append-only
+// We use WriteAt in WAL usually, and we often write record page cache aligned,
+// so the len(p) here is the unit size of WAL record, and it should be page cache aligned.
+func (l *Logger) WriteAt(p []byte, offset int64) (written int, err error) {
+	l.Mu.Lock()
+	defer l.Mu.Unlock()
+
+	written, err = l.file.WriteAt(p, offset)
+	if err != nil {
+		return
+	}
+
+	l.dirtySize += int64(written)
+	if l.syncWrite {
+		err = fnc.Flush(l.file, l.dirtyOffset, l.dirtySize)
+		if err != nil {
+			return
+		}
+		l.dirtyOffset += l.dirtySize
+		l.dirtySize = 0
+	} else {
+		if l.dirtySize >= l.bytesPerSync {
+			l.sync(false)
+		}
+	}
+
+	if l.dirtyOffset+l.dirtySize > l.maxSize { // We use preAllocate in writeAt mode, so fsize will be meaningless.
+		if err = l.openNew(); err != nil {
+			return
+		}
+	}
+	return
+}
+
 // Sync buf & dirty_page_cache to the storage media.
 func (l *Logger) Sync() (err error) {
 	l.Mu.Lock()
@@ -417,16 +479,20 @@ func (l *Logger) Sync() (err error) {
 
 func (l *Logger) sync(isBackup bool) {
 
-	l.buf.Flush()
+	if l.buf != nil {
+		l.buf.Flush()
+	}
 
-	l.syncJobs <- syncJob{l.file, l.fsize, l.dirtyOffset, l.dirtySize, isBackup}
+	if l.file != nil {
+		l.syncJobs <- syncJob{l.file, l.dirtyOffset, l.dirtySize, isBackup}
+	}
+
 	l.dirtyOffset += l.dirtySize
 	l.dirtySize = 0
 }
 
 type syncJob struct {
 	f        *os.File
-	fsize    int64
 	offset   int64
 	size     int64
 	isBackup bool
@@ -443,7 +509,7 @@ func (l *Logger) doSyncJob() {
 		if job.isBackup {
 			// warn: may drop too much cache or still dirty.
 			// because log ship may still need the cache(a bit slower than writing).
-			fnc.DropCache(f, 0, job.fsize)
+			fnc.DropCache(f, 0, l.maxSize)
 			f.Close()
 		}
 	}
@@ -471,6 +537,7 @@ func (h *BackupInfos) Len() int {
 	return len(*h)
 }
 
+// Don't forget nil
 func (h *BackupInfos) Pop() (v interface{}) {
 	if h.Len()-1 >= 0 {
 		*h, v = (*h)[:h.Len()-1], (*h)[h.Len()-1]
